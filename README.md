@@ -57,13 +57,14 @@ python figures.py  --bids-root data/ds004080 --out-dir outputs/art15 --results-d
 | Subject selection (36 subjects with at least one SOZ contact, 34 with at least three); share of contacts stimulated; pairs, SOZ and resected contacts, distances, volume-conduction check | `results/cohort.json` |
 | Retention rate per subject (needs the `*_summary.json` files written by stage 1) | `results/cohort.json` |
 | Group criterion of the original article, Table 2, first significant X per zone | `results/table2_group_significance.csv` |
-| Subject-level margins, 95 % CI, p and Benjamini-Hochberg q, two targets (Abstract, Results, Figure 3) | `results/subject_level_bootstrap.csv` |
+| Subject-level margins averaged over all X (0.1–10 %), 95 % CI, p and Benjamini-Hochberg q, two targets (Abstract, Results, Figure 3) | `results/subject_level_bootstrap.csv` |
 | Informative / borderline / counter-informative subjects (Results, Figure 4) | `results/per_subject_ghn2.csv` |
 | Noise of SOZ channels (median ratio, Wilcoxon test) | `results/noise_soz_ratio.csv` |
 | Ranking by noise alone, residualised ranking, Spearman correlation (Figure 5A) | `results/noise_competitors.csv` |
 | Artefact window extended from 15 to 35 ms | `results/artifact_window_35ms.csv` |
 | Removal of the eight flagged recordings versus 500 random removals | `results/flagged_random_removals.csv` |
-| Temporal versus extratemporal SOZ, permutation test (Figure 5B) | `results/anatomy_*.csv` |
+| Temporal versus extratemporal SOZ, margin over X ≤ 2 %, permutation test (Figure 5B) | `results/anatomy_*.csv` |
+| Fewer than 8 versus at least 8 trials per site: margins over X ≤ 2 %, permutation tests per zone, GhN2–GhN1 crossover and omnibus over the 55 zone pairs; other splits of the subjects | `results/trial_strata_*.csv` |
 | Figures 1 to 5 | `figures/*.png` |
 
 ## Deviations from the original implementation

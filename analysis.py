@@ -44,11 +44,8 @@ RESAMPLE_PER_X = False    # True: new surrogate matrix for every X, as in the or
                           # MATLAB code; False: one matrix per draw, evaluated at all X
 SEED_SURROGATES = 20260811
 
-N_BOOT = 4000                            # bootstrap over subjects
+N_BOOT = 4000                            # bootstrap over subjects (margin over all X)
 SEED_BOOT = 20260817
-# X values averaged by the subject-level margin: None = all X (0.1-10 %), which is
-# what produced the table reported in the paper; 2.0 = X <= 2 % only.
-MARGIN_X_MAX = None
 
 FLAGGED = ["ccepAgeUMCU07", "ccepAgeUMCU37", "ccepAgeUMCU44", "ccepAgeUMCU52",
            "ccepAgeUMCU53", "ccepAgeUMCU59", "ccepAgeUMCU60", "ccepAgeUMCU63"]
@@ -65,6 +62,11 @@ N_PERM_ANATOMY = 1000
 SEED_ANATOMY = 20260817
 TEMPORAL_KEYS = ("temp", "hippocamp", "parahip", "amygdal", "fusiform",
                  "collat", "planum", "heschl")    # Destrieux labels of the temporal lobe
+
+TRIALS_THRESHOLD = 8                     # strata: median trials per site < 8 or >= 8
+CROSS_ZONES = ("GhN2", "GhN1")           # zones of the crossover statistic
+N_PERM_STRATA = 1000
+SEED_STRATA = 20260817
 
 
 def x_index(x):
@@ -218,13 +220,10 @@ def build_arrays(subs):
     return T, U, zones
 
 
-def margin_x_sel():
-    return None if MARGIN_X_MAX is None else X_PERCENT <= MARGIN_X_MAX
-
-
 def group_margin(T, U, zone, idx, x_sel=None):
-    """Mean over X of: median across subjects idx of the specificity, minus the median
-    over draws of the median across the same subjects of the surrogate specificity."""
+    """Mean over X (all X, or the X selected by x_sel) of: median across subjects idx
+    of the specificity, minus the median over draws of the median across the same
+    subjects of the surrogate specificity."""
     tm = np.nanmedian(T[zone][idx], axis=0)
     sm = np.nanmedian(np.nanmedian(U[zone][idx], axis=0), axis=0)
     d = tm - sm
@@ -232,10 +231,11 @@ def group_margin(T, U, zone, idx, x_sel=None):
 
 
 def bootstrap_margins(subs, target):
-    """Margin, 95 % percentile CI and two-sided p from N_BOOT resamples of subjects,
-    then Benjamini-Hochberg over the 11 zones (p floored at 1 / N_BOOT)."""
+    """Margin averaged over all X (0.1-10 %), 95 % percentile CI and two-sided p from
+    N_BOOT resamples of subjects, then Benjamini-Hochberg over the 11 zones (p floored
+    at 1 / N_BOOT)."""
     T, U, zones = build_arrays(subs)
-    x_sel = margin_x_sel()
+    x_sel = None
     rng = np.random.default_rng(SEED_BOOT)
     n, rows = len(subs), []
     for z in zones:
@@ -424,9 +424,10 @@ def classify_anatomy(subjects, bids_root):
 
 
 def anatomy_test(subs, cls, tfz=MAIN_ZONE):
-    """Margin difference temporal - extratemporal, two-sided label permutation test."""
+    """Margin over X <= 2 %, temporal minus extratemporal; two-sided label permutation
+    test."""
     T, U, _ = build_arrays(subs)
-    x_sel = margin_x_sel()
+    x_sel = X_PERCENT <= X_CLINICAL
     grp = cls.set_index("subject")["group"].to_dict()
     lab = np.array([grp.get(s["subject"], "undetermined") for s in subs])
     idx_t = np.where(lab == "temporal")[0]
@@ -445,6 +446,89 @@ def anatomy_test(subs, cls, tfz=MAIN_ZONE):
                 margin_temporal=round(m_t, 1), margin_extratemporal=round(m_e, 1),
                 difference=round(obs, 1),
                 p=round(float(np.mean(np.abs(perm) >= abs(obs))), 4)), perm
+
+
+# =============================================================================
+# TRIAL-COUNT STRATIFICATION (exploratory)
+# =============================================================================
+
+def trials_per_subject(subs, out_dir):
+    """Median number of trials per site of each subject (10, or 5 per polarity)."""
+    return pd.Series({s["subject"]: float(pd.read_csv(
+        os.path.join(out_dir, f"sub-{s['subject']}_significance_fractions.csv"),
+        usecols=["n_trials"])["n_trials"].median()) for s in subs})
+
+
+def trial_count_stratification(subs, trials):
+    """Margin over X <= 2 % in subjects with fewer than 8 trials versus the others.
+    Stratum labels are permuted N_PERM_STRATA times (group sizes kept) to test, per
+    zone, the margin difference (Benjamini-Hochberg over zones) and the crossover
+    (GhN2 difference - GhN1 difference). The omnibus p compares the observed crossover
+    with the maximum crossover over the 55 zone pairs of each permutation, which
+    corrects for having selected this pair after inspection."""
+    T, U, zones = build_arrays(subs)
+    sel = X_PERCENT <= X_CLINICAL
+    is_lo = np.array([trials[s["subject"]] < TRIALS_THRESHOLD for s in subs])
+    idx_lo, idx_hi = np.where(is_lo)[0], np.where(~is_lo)[0]
+
+    def diff(z, lo, hi):
+        return group_margin(T, U, z, lo, sel) - group_margin(T, U, z, hi, sel)
+
+    obs = {z: diff(z, idx_lo, idx_hi) for z in zones}
+    rng = np.random.default_rng(SEED_STRATA)
+    perm = {z: np.empty(N_PERM_STRATA) for z in zones}
+    all_idx = np.arange(len(subs))
+    for i in range(N_PERM_STRATA):
+        lo = rng.choice(all_idx, size=int(is_lo.sum()), replace=False)
+        hi = np.setdiff1d(all_idx, lo)
+        for z in zones:
+            perm[z][i] = diff(z, lo, hi)
+
+    table = pd.DataFrame([dict(zone=z, n_low=len(idx_lo), n_high=len(idx_hi),
+                               margin_low=round(group_margin(T, U, z, idx_lo, sel), 1),
+                               margin_high=round(group_margin(T, U, z, idx_hi, sel), 1),
+                               difference=round(obs[z], 1),
+                               p=round(float(np.mean(np.abs(perm[z]) >= abs(obs[z]))), 4))
+                          for z in zones])
+    table["q_bh"] = np.round(fdrcorrection(table["p"].values, alpha=0.05,
+                                           method="indep")[1], 4)
+
+    za, zb = CROSS_ZONES
+    cross = obs[za] - obs[zb]
+    P_ = np.array([perm[z] for z in zones])
+    iu = np.triu_indices(len(zones), k=1)                   # the 55 zone pairs
+    max_cross = np.abs(P_[:, None, :] - P_[None, :, :])[iu].max(axis=0)
+    return table, dict(crossover=round(cross, 1),
+                       p_crossover=float(np.mean(np.abs(perm[za] - perm[zb]) >= abs(cross))),
+                       p_omnibus=float(np.mean(max_cross >= abs(cross))))
+
+
+def competing_splits(subs, trials, noise):
+    """GhN2 and GhN1 margin differences for other median splits of the subjects
+    (trials split at 8): is the trial count the only variable giving this divide?"""
+    T, U, _ = build_arrays(subs)
+    sel = X_PERCENT <= X_CLINICAL
+    meta = pd.DataFrame(dict(
+        n_trials_median=[trials[s["subject"]] for s in subs],
+        n_pairs=[s["n_pairs"] for s in subs],
+        index=[int("".join(c for c in s["subject"] if c.isdigit())) for s in subs],
+        n_soz=[s["n_soz"] for s in subs],
+        noise_median=[round(float(np.median(list(noise[s["subject"]].values()))), 1)
+                      for s in subs]))
+    za, zb = CROSS_ZONES
+    rows = []
+    for var in meta.columns:
+        thr = TRIALS_THRESHOLD if var == "n_trials_median" else meta[var].median()
+        lo = np.where(meta[var].values < thr)[0]
+        hi = np.where(meta[var].values >= thr)[0]
+        if len(lo) < 5 or len(hi) < 5:
+            continue
+        d_a = group_margin(T, U, za, lo, sel) - group_margin(T, U, za, hi, sel)
+        d_b = group_margin(T, U, zb, lo, sel) - group_margin(T, U, zb, hi, sel)
+        rows.append(dict(variable=var, threshold=round(float(thr), 1), n_low=len(lo),
+                         n_high=len(hi), difference_ghn2=round(d_a, 1),
+                         difference_ghn1=round(d_b, 1), crossover=round(d_a - d_b, 1)))
+    return pd.DataFrame(rows).sort_values("crossover", key=abs, ascending=False)
 
 
 # =============================================================================
@@ -570,8 +654,7 @@ def main():
     boot = pd.concat([bootstrap_margins(subs, "hypothesised SOZ"),
                       bootstrap_margins(subs_res, "resected tissue")], ignore_index=True)
     boot.to_csv(rd("subject_level_bootstrap.csv"), index=False)
-    say(f"\nSUBJECT-LEVEL BOOTSTRAP, {N_BOOT} resamples, margin averaged over "
-        f"{'all X' if MARGIN_X_MAX is None else f'X <= {MARGIN_X_MAX:g} %'} "
+    say(f"\nSUBJECT-LEVEL BOOTSTRAP, {N_BOOT} resamples, margin averaged over all X "
         f"(Abstract, Results, Figure 3)")
     say(boot.to_string(index=False))
 
@@ -622,6 +705,20 @@ def main():
     pd.DataFrame(dict(difference=perm_anat)).to_csv(rd("anatomy_permutations.csv"),
                                                     index=False)
     say(f"\nANATOMY (Figure 5B): {anat}")
+
+    trials = trials_per_subject(subs, args.out_dir)
+    strata, cross = trial_count_stratification(subs, trials)
+    strata.to_csv(rd("trial_strata_permutation.csv"), index=False)
+    splits = competing_splits(subs, trials, noise)
+    splits.to_csv(rd("trial_strata_competing_splits.csv"), index=False)
+    say(f"\nTRIAL-COUNT STRATIFICATION, X <= 2 %, {N_PERM_STRATA} permutations "
+        f"(Results > Exploratory observations)")
+    say(strata.to_string(index=False))
+    say(f"  crossover {CROSS_ZONES[0]} - {CROSS_ZONES[1]}: {cross['crossover']:+.1f} points, "
+        f"p = {cross['p_crossover']:.3f}; omnibus over the 55 zone pairs: "
+        f"p = {cross['p_omnibus']:.3f}")
+    say("  other splits of the subjects:")
+    say(splits.to_string(index=False))
 
     with open(rd("report.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")
